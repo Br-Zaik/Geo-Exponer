@@ -1,0 +1,113 @@
+name: Build APK from ZIP
+
+on:
+  push:
+    branches:
+      - main
+      - master
+    paths:
+      - "**.zip"
+      - ".github/workflows/build-apk.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build Android APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Find and unzip Android project
+        shell: bash
+        run: |
+          set -e
+
+          echo "Searching ZIP files..."
+          ZIP_COUNT=$(find . -type f -name "*.zip" | wc -l)
+
+          if [ "$ZIP_COUNT" -eq 0 ]; then
+            echo "No ZIP found. Searching Android project directly in repository..."
+            PROJECT_DIR=$(find . -type f \( -name "settings.gradle" -o -name "settings.gradle.kts" \) -printf "%h\n" | head -n 1 || true)
+          elif [ "$ZIP_COUNT" -eq 1 ]; then
+            ZIP_FILE=$(find . -type f -name "*.zip" | head -n 1)
+            echo "ZIP found: $ZIP_FILE"
+
+            rm -rf build_zip
+            mkdir -p build_zip
+            unzip -q "$ZIP_FILE" -d build_zip
+
+            PROJECT_DIR=$(find build_zip -type f \( -name "settings.gradle" -o -name "settings.gradle.kts" \) -printf "%h\n" | head -n 1 || true)
+
+            if [ -z "$PROJECT_DIR" ]; then
+              PROJECT_DIR=$(find build_zip -type f -name "build.gradle" -printf "%h\n" | head -n 1 || true)
+            fi
+          else
+            echo "ERROR: More than one ZIP found. Leave only one ZIP in the repository."
+            exit 1
+          fi
+
+          if [ -z "$PROJECT_DIR" ]; then
+            echo "ERROR: Android project not found."
+            echo "The ZIP must contain a complete Android project with settings.gradle or build.gradle."
+            exit 1
+          fi
+
+          echo "Project detected at: $PROJECT_DIR"
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+
+      - name: Build debug APK
+        shell: bash
+        run: |
+          set -e
+
+          cd "$PROJECT_DIR"
+
+          if [ ! -f "./gradlew" ]; then
+            echo "ERROR: gradlew not found."
+            echo "Upload the complete Android project ZIP, not only the app folder."
+            exit 1
+          fi
+
+          sed -i 's/\r$//' gradlew
+          chmod +x gradlew
+
+          ./gradlew assembleDebug --no-daemon
+
+      - name: Collect APK files
+        shell: bash
+        run: |
+          set -e
+
+          rm -rf output_apk
+          mkdir -p output_apk
+
+          find "$PROJECT_DIR" -type f -path "*/build/outputs/apk/*/*.apk" -exec cp {} output_apk/ \;
+
+          APK_COUNT=$(find output_apk -type f -name "*.apk" | wc -l)
+
+          if [ "$APK_COUNT" -eq 0 ]; then
+            echo "ERROR: APK was not generated."
+            exit 1
+          fi
+
+          echo "APK generated successfully:"
+          ls -la output_apk
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Geo-Exponer-APK
+          path: output_apk/*.apk
